@@ -1663,20 +1663,46 @@ async function queryNif(nif, yearFrom, yearTo, instrumento) {
 
 // ── Llamada real a la API de Anthropic ──────────────────────
 async function callClaudeAPI(nif, yearFrom, yearTo, instrumento, apiKey) {
-  const yearFilter = (yearFrom && yearTo) ? ` entre los años ${yearFrom} y ${yearTo}` : '';
-  const instrFilter = instrumento ? ` de tipo "${instrumento}"` : '';
+  // URLs reales de la API REST BDNS
+  let apiUrl = `https://www.pap.hacienda.gob.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
+  if (yearFrom) apiUrl += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
+  const webUrl = `https://www.pap.hacienda.gob.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${encodeURIComponent(nif)}`;
 
-  const systemMsg = `Eres un asistente especializado en consultar la Base de Datos Nacional de Subvenciones (BDNS) de España.
-Cuando te pidan buscar concesiones de un NIF, debes hacer una búsqueda web en infosubvenciones.es y devolver EXCLUSIVAMENTE un objeto JSON válido sin ningún texto adicional, sin bloques de código markdown, sin explicaciones.`;
+  const systemMsg = `Eres un extractor de datos JSON de la BDNS (Base de Datos Nacional de Subvenciones de España).
+Tu única función es: buscar datos en la URL que te indiquen y devolver EXCLUSIVAMENTE un objeto JSON válido.
+NUNCA incluyas texto antes o después del JSON. NUNCA uses bloques de código markdown. NUNCA expliques nada.
+Solo devuelve el objeto JSON.`;
 
-  const userMsg = `Busca en la BDNS española (infosubvenciones.es) todas las concesiones de subvenciones y ayudas públicas del beneficiario con NIF/CIF "${nif}"${yearFilter}${instrFilter}.
+  // Turno 1: pedimos a Claude que use web_search para fetch de la API BDNS directamente
+  const userMsg1 = `Accede a esta URL de la API REST de la BDNS española y extrae los datos:
+${apiUrl}
 
-Consulta esta URL: https://www.infosubvenciones.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${nif}
+Si esa URL no funciona, intenta también: ${webUrl}
 
-Devuelve ÚNICAMENTE este JSON (sin markdown, sin texto antes ni después):
-{"nif":"${nif}","nombre":"Nombre del beneficiario","totalConcesiones":5,"importeTotal":125000,"concesiones":[{"id":"SB2023001","titulo":"Nombre de la convocatoria","importe":25000,"fechaConcesion":"15/03/2023","organo":"Ministerio de Industria","ccaa":"Madrid","provincia":"Madrid","instrumento":"SB","convocatoria":"BDNS-500001"}]}
+Una vez obtengas los datos, devuelve SOLO este JSON (sin markdown, sin explicación, sin nada más):
+{
+  "nif": "${nif}",
+  "nombre": "nombre del beneficiario según los datos",
+  "totalConcesiones": número_total,
+  "importeTotal": suma_total_euros,
+  "concesiones": [
+    {
+      "id": "código BDNS",
+      "titulo": "denominación de la convocatoria",
+      "importe": importe_en_euros,
+      "fechaConcesion": "DD/MM/YYYY",
+      "organo": "nombre del órgano concedente",
+      "ccaa": "nombre comunidad autónoma",
+      "provincia": "nombre provincia",
+      "instrumento": "SB o PR o GR o VF",
+      "convocatoria": "código convocatoria BDNS"
+    }
+  ]
+}
 
-Si no hay datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`;
+Si no encuentras datos para este NIF devuelve: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}
+
+IMPORTANTE: La respuesta debe empezar con { y terminar con }. Cero texto adicional.`;
 
   const headers = {
     'Content-Type': 'application/json',
@@ -1686,7 +1712,7 @@ Si no hay datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"impo
   if (apiKey) headers['x-api-key'] = apiKey;
 
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 50000);
+  const timer = setTimeout(() => ctrl.abort(), 90000); // 90s para dar tiempo al web_search + parsing
 
   let res;
   try {
@@ -1695,16 +1721,16 @@ Si no hay datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"impo
       headers,
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
+        max_tokens: 8192,
         system: systemMsg,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: userMsg }]
+        messages: [{ role: 'user', content: userMsg1 }]
       }),
       signal: ctrl.signal
     });
   } catch (fetchErr) {
     clearTimeout(timer);
-    if (fetchErr.name === 'AbortError') throw new Error('Timeout (50s) — la API tardó demasiado');
+    if (fetchErr.name === 'AbortError') throw new Error('Timeout (90s) — búsqueda tardó demasiado');
     throw new Error('Error de red: ' + fetchErr.message);
   }
   clearTimeout(timer);
@@ -1717,21 +1743,69 @@ Si no hay datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"impo
 
   const data = await res.json();
 
-  // Extraer JSON de la respuesta (puede venir entre text blocks)
+  // Extraer texto de la respuesta
   const allText = data.content
     .filter(b => b.type === 'text')
     .map(b => b.text)
     .join('');
 
-  // Buscar el JSON más completo en la respuesta
-  const jsonMatch = allText.match(/\{[\s\S]*"concesiones"[\s\S]*\}/);
-  if (!jsonMatch) {
-    // Intentar cualquier objeto JSON
-    const anyJson = allText.match(/\{[\s\S]*\}/);
-    if (!anyJson) throw new Error('La API no devolvió JSON válido. Respuesta: ' + allText.slice(0, 100));
-    return JSON.parse(anyJson[0]);
+  addLog(`  ↳ Respuesta recibida (${allText.length} chars), parseando...`, '');
+
+  // Buscar JSON con el campo "concesiones"
+  const jsonMatch = allText.match(/\{[\s\S]*?"concesiones"[\s\S]*?\}/);
+  if (jsonMatch) {
+    try { return JSON.parse(jsonMatch[0]); } catch(e) {}
   }
-  return JSON.parse(jsonMatch[0]);
+
+  // Si la respuesta incluye JSON mal formateado, intentar extraer el bloque más largo
+  const allJsons = [...allText.matchAll(/\{[\s\S]*?\}/g)];
+  const longest = allJsons.sort((a,b) => b[0].length - a[0].length)[0];
+  if (longest) {
+    try { return JSON.parse(longest[0]); } catch(e) {}
+  }
+
+  // Si no hay JSON pero hay texto con datos, pedir a Claude que lo reformatee
+  if (allText.length > 50) {
+    addLog(`  ↳ Sin JSON limpio, solicitando reformateo...`, '');
+    return await reformatResponse(allText, nif, headers);
+  }
+
+  throw new Error('La API no devolvió datos válidos para este NIF.');
+}
+
+// Si Claude devolvió texto en vez de JSON, pedirle que lo convierta
+async function reformatResponse(rawText, nif, headers) {
+  const ctrl2 = new AbortController();
+  const t2 = setTimeout(() => ctrl2.abort(), 30000);
+  try {
+    const res2 = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: `Convierte este texto en el JSON exacto que se pide. Responde SOLO con el JSON:
+
+TEXTO CON DATOS:
+${rawText.slice(0, 3000)}
+
+JSON REQUERIDO:
+{"nif":"${nif}","nombre":"nombre empresa","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"","titulo":"","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"","ccaa":"","provincia":"","instrumento":"SB","convocatoria":""}]}
+
+Si no hay datos de concesiones: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`
+        }]
+      }),
+      signal: ctrl2.signal
+    });
+    clearTimeout(t2);
+    const d2 = await res2.json();
+    const t2text = d2.content.filter(b => b.type==='text').map(b=>b.text).join('');
+    const m2 = t2text.match(/\{[\s\S]*\}/);
+    if (m2) return JSON.parse(m2[0]);
+    throw new Error('No se pudo parsear la respuesta');
+  } finally { clearTimeout(t2); }
 }
 
 // =====================================================
