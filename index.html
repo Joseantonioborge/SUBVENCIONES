@@ -1567,6 +1567,14 @@ function loadDemo() {
 // =====================================================
 // MOTOR DE CONSULTA — proxy serverless /api/bdns
 // =====================================================
+// El proxy vive en Vercel. Si el HTML se sirve desde el mismo origen
+// (subvenciones-*.vercel.app) usamos ruta relativa; si se sirve desde
+// otro hosting (GitHub Pages, file://, etc.) apuntamos al dominio
+// absoluto de Vercel para que GitHub Pages pueda llamar al proxy via CORS.
+const PROXY_ORIGIN = (typeof location !== 'undefined' && /\.vercel\.app$/i.test(location.hostname))
+  ? ''
+  : 'https://subvenciones-one.vercel.app';
+
 let searchAborted = false;
 let activeAbortCtrl = null;
 
@@ -1589,7 +1597,7 @@ async function queryNif(nif, yearFrom, yearTo, instrumento) {
 
   let res;
   try {
-    res = await fetch(`/api/bdns?${params.toString()}`, {
+    res = await fetch(`${PROXY_ORIGIN}/api/bdns?${params.toString()}`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
       signal: activeAbortCtrl.signal
