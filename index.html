@@ -1227,7 +1227,10 @@
       <div class="progress-wrap" id="progressWrap">
         <div class="progress-title">
           <span id="progressLabel">Consultando BDNS...</span>
-          <span id="progressPct" style="color:var(--accent);font-weight:600">0%</span>
+          <div style="display:flex;align-items:center;gap:12px">
+            <span id="progressPct" style="color:var(--accent);font-weight:600">0%</span>
+            <button onclick="cancelSearch()" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);color:#f87171;font-family:var(--font-mono);font-size:10px;padding:3px 10px;cursor:pointer;letter-spacing:.05em">⊘ Cancelar</button>
+          </div>
         </div>
         <div class="progress-bar-track">
           <div class="progress-bar-fill" id="progressBar" style="width:0%"></div>
@@ -1612,141 +1615,172 @@ function updateApiStatus() {
 }
 
 // =====================================================
-// QUERY BDNS — 3-strategy fallback
+// QUERY BDNS — sistema con cancelación y timeouts
 // =====================================================
+let activeController = null; // global abort controller
+
+function cancelSearch() {
+  if (activeController) {
+    activeController.abort();
+    activeController = null;
+    addLog('⊘ Búsqueda cancelada por el usuario.', 'warn');
+  }
+}
+
 async function queryNif(nif, yearFrom, yearTo, instrumento) {
-  // Strategy 1: Direct BDNS REST API
+  // Strategy 1: API BDNS directa
   try {
-    return await queryBDNSDirect(nif, yearFrom, yearTo);
+    addLog(`  ↳ [1/3] Probando API BDNS directa...`, '');
+    const r = await queryBDNSDirect(nif, yearFrom, yearTo);
+    addLog(`  ↳ API directa: OK`, 'ok');
+    return r;
   } catch (e1) {
-    addLog(`  ↳ API directa falló (${e1.message.slice(0,40)}), intentando proxy...`, '');
+    addLog(`  ↳ [1/3] API directa: ${e1.name === 'AbortError' ? 'timeout 8s' : e1.message.slice(0,50)}`, '');
   }
 
-  // Strategy 2: CORS proxy
-  try {
-    return await queryBDNSProxy(nif, yearFrom, yearTo);
-  } catch (e2) {
-    addLog(`  ↳ Proxy falló (${e2.message.slice(0,40)}), intentando Claude API...`, '');
+  // Strategy 2: CORS proxy (varios)
+  const proxies = [
+    `https://corsproxy.io/?`,
+    `https://api.allorigins.win/raw?url=`,
+    `https://proxy.cors.sh/`
+  ];
+  for (let pi = 0; pi < proxies.length; pi++) {
+    try {
+      addLog(`  ↳ [2/3] Proxy ${pi+1}/${proxies.length}...`, '');
+      const r = await queryBDNSProxy(nif, yearFrom, yearTo, proxies[pi]);
+      addLog(`  ↳ Proxy ${pi+1}: OK`, 'ok');
+      return r;
+    } catch (ep) {
+      addLog(`  ↳ Proxy ${pi+1}: ${ep.name === 'AbortError' ? 'timeout' : ep.message.slice(0,40)}`, '');
+    }
   }
 
-  // Strategy 3: Anthropic API with user key
-  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  // Strategy 3: Claude API con API key
+  const apiKey = (document.getElementById('apiKeyInput').value || '').trim();
   if (!apiKey) {
-    throw new Error('Sin conexión a BDNS y sin API key. Introduce tu clave Anthropic o usa el modo Demo.');
+    throw new Error(
+      'No hay conexión a BDNS (CORS bloqueado) y no hay API key configurada. ' +
+      'Introduce tu clave Anthropic en el panel izquierdo o usa el modo Demo.'
+    );
   }
+  if (!apiKey.startsWith('sk-ant-')) {
+    throw new Error('API key inválida — debe empezar por "sk-ant-". Revisa el panel de configuración.');
+  }
+
+  addLog(`  ↳ [3/3] Consultando via Claude API (puede tardar ~15s)...`, 'warn');
   return await queryViaClaude(nif, yearFrom, yearTo, instrumento, apiKey);
 }
 
-// --- Strategy 1: Direct BDNS REST ---
+// --- Strategy 1: API BDNS directa ---
 async function queryBDNSDirect(nif, yearFrom, yearTo) {
   let url = `https://www.infosubvenciones.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
   if (yearFrom) url += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      signal: controller.signal
-    });
+    const res = await fetch(url, { headers: { Accept: 'application/json' }, signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    return mapBDNSResponse(nif, json);
-  } finally {
-    clearTimeout(timer);
-  }
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('json')) throw new Error('Respuesta no JSON: ' + ct.split(';')[0]);
+    return mapBDNSResponse(nif, await res.json());
+  } finally { clearTimeout(t); }
 }
 
 // --- Strategy 2: CORS proxy ---
-async function queryBDNSProxy(nif, yearFrom, yearTo) {
+async function queryBDNSProxy(nif, yearFrom, yearTo, proxyBase) {
   let target = `https://www.infosubvenciones.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
   if (yearFrom) target += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
+  const url = proxyBase + encodeURIComponent(target);
 
-  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(target)}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 10000);
   try {
-    const res = await fetch(proxyUrl, { signal: controller.signal });
-    if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
-    const json = await res.json();
-    return mapBDNSResponse(nif, json);
-  } finally {
-    clearTimeout(timer);
-  }
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    // Validate it's actual JSON, not an HTML error page
+    const trimmed = text.trim();
+    if (trimmed.startsWith('<') || trimmed.startsWith('<!')) throw new Error('Proxy devolvió HTML en vez de JSON');
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) throw new Error('Respuesta inesperada del proxy');
+    return mapBDNSResponse(nif, JSON.parse(trimmed));
+  } finally { clearTimeout(t); }
 }
 
 // --- Map BDNS API response to internal format ---
 function mapBDNSResponse(nif, json) {
-  // The BDNS API may return { content: [...], totalElements: N } or similar
   const items = json.content || json.concesiones || json.data || (Array.isArray(json) ? json : []);
   const concesiones = items.map(item => ({
-    id:             item.codigoBDNS || item.id || item.codigo || '',
-    titulo:         item.denominacion || item.titulo || item.descripcion || item.nombreConvocatoria || '—',
-    importe:        parseFloat(item.importe || item.importeConcedido || item.cuantia || 0) || 0,
+    id:            item.codigoBDNS   || item.id          || item.codigo   || '',
+    titulo:        item.denominacion || item.titulo       || item.descripcion || item.nombreConvocatoria || '—',
+    importe:       parseFloat(item.importe || item.importeConcedido || item.cuantia || 0) || 0,
     fechaConcesion: formatBDNSDate(item.fechaConcesion || item.fecha || item.fechaResolucion || ''),
-    organo:         item.organoConvocante || item.organo || item.administracion || '—',
-    ccaa:           item.regionCCAA || item.ccaa || item.comunidadAutonoma || item.region || '—',
-    provincia:      item.provincia || item.municipio || '—',
-    instrumento:    item.instrumento || item.tipoInstrumento || 'SB',
-    convocatoria:   item.codigoConvocatoria || item.convocatoria || ''
+    organo:        item.organoConvocante || item.organo   || item.administracion || '—',
+    ccaa:          item.regionCCAA  || item.ccaa          || item.comunidadAutonoma || item.region || '—',
+    provincia:     item.provincia   || item.municipio     || '—',
+    instrumento:   item.instrumento || item.tipoInstrumento || 'SB',
+    convocatoria:  item.codigoConvocatoria || item.convocatoria || ''
   }));
-
   const nombre = items[0]?.nombreBeneficiario || items[0]?.beneficiario || items[0]?.razonSocial || nif;
-  const importeTotal = concesiones.reduce((s, c) => s + c.importe, 0);
-
-  return { nif, nombre, totalConcesiones: concesiones.length, importeTotal, concesiones };
+  return { nif, nombre, totalConcesiones: concesiones.length, importeTotal: concesiones.reduce((s,c) => s+c.importe, 0), concesiones };
 }
 
 function formatBDNSDate(raw) {
   if (!raw) return '';
-  // Handle ISO dates: 2023-05-12T00:00:00
   const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
-  // Already DD/MM/YYYY
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) return raw;
   return raw;
 }
 
-// --- Strategy 3: Anthropic API ---
+// --- Strategy 3: Claude API con clave ---
 async function queryViaClaude(nif, yearFrom, yearTo, instrumento, apiKey) {
   const yearFilter = (yearFrom && yearTo) ? ` entre ${yearFrom} y ${yearTo}` : '';
   const instrFilter = instrumento ? ` (instrumento: ${instrumento})` : '';
 
-  const prompt = `Consulta la Base de Datos Nacional de Subvenciones (BDNS) de España en infosubvenciones.es.
-Busca las concesiones del beneficiario con NIF/CIF "${nif}"${yearFilter}${instrFilter}.
-URL de búsqueda: https://www.infosubvenciones.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${nif}
+  const prompt = `Consulta la Base de Datos Nacional de Subvenciones (BDNS) de España.
+Busca las concesiones del beneficiario NIF/CIF "${nif}"${yearFilter}${instrFilter}.
+Visita: https://www.infosubvenciones.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${nif}
 
-Devuelve ÚNICAMENTE JSON sin markdown ni texto adicional:
-{"nif":"${nif}","nombre":"Nombre empresa","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"código","titulo":"título","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"órgano","ccaa":"CCAA","provincia":"provincia","instrumento":"SB","convocatoria":"BDNS-XXXXX"}]}
-
+Devuelve SOLO JSON sin markdown:
+{"nif":"${nif}","nombre":"Nombre","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"","titulo":"","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"","ccaa":"","provincia":"","instrumento":"SB","convocatoria":""}]}
 Sin datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{ role: 'user', content: prompt }]
-    })
-  });
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 45000); // 45s timeout
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: ctrl.signal
+    });
 
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody?.error?.message || `API ${res.status}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `API Anthropic ${res.status}`);
+    }
+    const data = await res.json();
+    const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('Sin JSON en respuesta de Claude');
+    return JSON.parse(match[0]);
+  } catch(e) {
+    if (e.name === 'AbortError') throw new Error('Timeout (45s) en Claude API. Verifica tu API key o inténtalo de nuevo.');
+    throw e;
+  } finally {
+    clearTimeout(t);
   }
-  const data = await res.json();
-  const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('Sin JSON en respuesta Claude');
-  return JSON.parse(match[0]);
 }
 
 // =====================================================
@@ -1759,6 +1793,19 @@ async function iniciarConsulta() {
   const yearFrom = document.getElementById('yearFrom').value;
   const yearTo   = document.getElementById('yearTo').value;
   const instrumento = document.getElementById('filterInstrumento').value;
+  const apiKey = (document.getElementById('apiKeyInput').value || '').trim();
+
+  // Aviso temprano si no hay API key (las estrategias directa/proxy probablemente fallarán por CORS)
+  if (!apiKey) {
+    const proceed = confirm(
+      '⚠️ Sin API Key configurada.\n\n' +
+      'Se intentará conectar directamente con la BDNS (suele fallar por CORS en navegadores).\n\n' +
+      '• Para resultados reales: introduce tu clave Anthropic en el panel izquierdo.\n' +
+      '• Para probar la app: usa el botón "Demo" del header.\n\n' +
+      '¿Intentar la conexión directa igualmente?'
+    );
+    if (!proceed) return;
+  }
 
   // Reset
   allData = []; filteredData = []; currentPage = 1;
