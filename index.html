@@ -1175,45 +1175,13 @@
         </div>
       </div>
 
-      <!-- API KEY CONFIG -->
-      <div class="panel" style="margin-top:16px">
-        <div class="panel-header">
-          <span class="panel-title">⚙ Configuración API</span>
-          <span id="apiStatus" class="panel-count" style="color:var(--text-muted)">Sin clave</span>
-        </div>
-        <div class="panel-body" style="padding:16px">
-          <div class="opt-group" style="margin-bottom:10px">
-            <label style="font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);display:block;margin-bottom:6px">
-              Anthropic API Key <span style="color:var(--danger)">*</span>
-            </label>
-            <input
-              type="password"
-              id="apiKeyInput"
-              placeholder="sk-ant-api03-..."
-              oninput="updateApiStatus()"
-              style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--font-mono);font-size:12px;padding:8px 10px;outline:none;transition:border-color .2s"
-              onfocus="this.style.borderColor='var(--accent)'"
-              onblur="this.style.borderColor='var(--border)'"
-            >
-          </div>
-          <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);line-height:1.7">
-            Necesaria para consultar la BDNS real.<br>
-            Obtén tu clave en <a href="https://console.anthropic.com/keys" target="_blank" style="color:var(--accent2)">console.anthropic.com</a><br>
-            <span style="color:rgba(100,116,139,0.6)">La clave no se almacena ni se envía a terceros.</span>
-          </div>
-          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-family:var(--font-mono);font-size:10px;color:var(--text-muted);line-height:1.7">
-            Sin clave: usa el botón <strong style="color:var(--accent3)">▶ Demo</strong> del header para ver datos de ejemplo con todas las funcionalidades activas.
-          </div>
-        </div>
-      </div>
-
       <!-- HELP CARD -->
       <div class="panel" style="margin-top:16px">
         <div class="panel-header">
-          <span class="panel-title">Instrucciones</span>
+          <span class="panel-title">Fuente de datos</span>
         </div>
         <div class="panel-body" style="font-family:var(--font-mono);font-size:11px;line-height:1.8;color:var(--text-muted)">
-          <p>Los datos provienen de la <strong style="color:var(--text-dim)">API pública del SNPSAP</strong> (infosubvenciones.es) vía Claude con búsqueda web.</p>
+          <p>Datos en tiempo real de la <strong style="color:var(--text-dim)">API pública SNPSAP</strong> (Ministerio de Hacienda) vía proxy serverless propio. Sin claves de terceros.</p>
           <br>
           <p>⚠️ <span style="color:var(--accent)">Nota legal:</span> Personas jurídicas: hasta 4 años desde la concesión. Personas físicas: año de concesión y el siguiente (RD 130/2019).</p>
         </div>
@@ -1597,215 +1565,62 @@ function loadDemo() {
 }
 
 // =====================================================
-// API KEY STATUS
-// =====================================================
-function updateApiStatus() {
-  const key = document.getElementById('apiKeyInput').value.trim();
-  const el = document.getElementById('apiStatus');
-  if (key.startsWith('sk-ant-')) {
-    el.textContent = '✓ Clave válida';
-    el.style.color = 'var(--accent3)';
-  } else if (key.length > 0) {
-    el.textContent = '⚠ Formato incorrecto';
-    el.style.color = 'var(--accent)';
-  } else {
-    el.textContent = 'Sin clave';
-    el.style.color = 'var(--text-muted)';
-  }
-}
-
-// =====================================================
-// MOTOR DE CONSULTA — directo a Anthropic API
+// MOTOR DE CONSULTA — proxy serverless /api/bdns
 // =====================================================
 let searchAborted = false;
+let activeAbortCtrl = null;
 
 function cancelSearch() {
   searchAborted = true;
+  if (activeAbortCtrl) activeAbortCtrl.abort();
   addLog('⊘ Búsqueda cancelada por el usuario.', 'warn');
 }
 
 async function queryNif(nif, yearFrom, yearTo, instrumento) {
   if (searchAborted) throw new Error('Búsqueda cancelada');
+  addLog(`  ↳ Consultando BDNS (proxy /api/bdns)...`, '');
 
-  const apiKey = (document.getElementById('apiKeyInput').value || '').trim();
+  const params = new URLSearchParams({ nif });
+  if (yearFrom) params.set('yearFrom', yearFrom);
+  if (yearTo) params.set('yearTo', yearTo);
 
-  // Intentar primero SIN clave (funciona en modo artefacto claude.ai)
-  addLog(`  ↳ Consultando BDNS via Claude AI...`, '');
-  try {
-    return await callClaudeAPI(nif, yearFrom, yearTo, instrumento, '');
-  } catch (e0) {
-    const msg = e0.message || '';
-    // Si falla por auth (401), necesita clave de usuario
-    if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('authentication')) {
-      addLog(`  ↳ Modo standalone: se requiere API key`, '');
-    } else if (!msg.includes('cancelada')) {
-      addLog(`  ↳ Sin clave: ${msg.slice(0,60)}`, '');
-    }
-  }
-
-  // Intentar CON clave de usuario si está configurada
-  if (apiKey) {
-    if (!apiKey.startsWith('sk-ant-')) {
-      throw new Error('API key inválida (debe empezar por "sk-ant-"). Revisa el panel de Configuración API.');
-    }
-    addLog(`  ↳ Reintentando con API key del usuario...`, 'warn');
-    return await callClaudeAPI(nif, yearFrom, yearTo, instrumento, apiKey);
-  }
-
-  // Sin clave y sin modo artefacto → error claro
-  throw new Error(
-    'No se pudo autenticar con la API de Anthropic.\n\n' +
-    'SOLUCIÓN: Introduce tu Anthropic API Key en el panel "Configuración API" del sidebar izquierdo.\n' +
-    'Puedes obtenerla gratis en console.anthropic.com → API Keys.\n\n' +
-    'O usa el botón ▶ Demo para explorar la app con datos de ejemplo.'
-  );
-}
-
-// ── Llamada real a la API de Anthropic ──────────────────────
-async function callClaudeAPI(nif, yearFrom, yearTo, instrumento, apiKey) {
-  // URLs reales de la API REST BDNS
-  let apiUrl = `https://www.pap.hacienda.gob.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
-  if (yearFrom) apiUrl += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
-  const webUrl = `https://www.pap.hacienda.gob.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${encodeURIComponent(nif)}`;
-
-  const systemMsg = `Eres un extractor de datos JSON de la BDNS (Base de Datos Nacional de Subvenciones de España).
-Tu única función es: buscar datos en la URL que te indiquen y devolver EXCLUSIVAMENTE un objeto JSON válido.
-NUNCA incluyas texto antes o después del JSON. NUNCA uses bloques de código markdown. NUNCA expliques nada.
-Solo devuelve el objeto JSON.`;
-
-  // Turno 1: pedimos a Claude que use web_search para fetch de la API BDNS directamente
-  const userMsg1 = `Accede a esta URL de la API REST de la BDNS española y extrae los datos:
-${apiUrl}
-
-Si esa URL no funciona, intenta también: ${webUrl}
-
-Una vez obtengas los datos, devuelve SOLO este JSON (sin markdown, sin explicación, sin nada más):
-{
-  "nif": "${nif}",
-  "nombre": "nombre del beneficiario según los datos",
-  "totalConcesiones": número_total,
-  "importeTotal": suma_total_euros,
-  "concesiones": [
-    {
-      "id": "código BDNS",
-      "titulo": "denominación de la convocatoria",
-      "importe": importe_en_euros,
-      "fechaConcesion": "DD/MM/YYYY",
-      "organo": "nombre del órgano concedente",
-      "ccaa": "nombre comunidad autónoma",
-      "provincia": "nombre provincia",
-      "instrumento": "SB o PR o GR o VF",
-      "convocatoria": "código convocatoria BDNS"
-    }
-  ]
-}
-
-Si no encuentras datos para este NIF devuelve: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}
-
-IMPORTANTE: La respuesta debe empezar con { y terminar con }. Cero texto adicional.`;
-
-  const headers = {
-    'Content-Type': 'application/json',
-    'anthropic-version': '2023-06-01',
-    'anthropic-dangerous-direct-browser-access': 'true'
-  };
-  if (apiKey) headers['x-api-key'] = apiKey;
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 90000); // 90s para dar tiempo al web_search + parsing
+  activeAbortCtrl = new AbortController();
+  const timer = setTimeout(() => activeAbortCtrl.abort(), 28000);
 
   let res;
   try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 8192,
-        system: systemMsg,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: userMsg1 }]
-      }),
-      signal: ctrl.signal
+    res = await fetch(`/api/bdns?${params.toString()}`, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      signal: activeAbortCtrl.signal
     });
   } catch (fetchErr) {
     clearTimeout(timer);
-    if (fetchErr.name === 'AbortError') throw new Error('Timeout (90s) — búsqueda tardó demasiado');
+    if (fetchErr.name === 'AbortError') {
+      throw new Error(searchAborted ? 'Búsqueda cancelada' : 'Timeout (28s) — la BDNS tardó demasiado en responder');
+    }
     throw new Error('Error de red: ' + fetchErr.message);
   }
   clearTimeout(timer);
 
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const msg = body?.error?.message || body?.error?.type || `HTTP ${res.status}`;
-    throw new Error(msg);
+    const detail = data?.detail || data?.error || `HTTP ${res.status}`;
+    throw new Error(detail);
   }
 
-  const data = await res.json();
-
-  // Extraer texto de la respuesta
-  const allText = data.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  addLog(`  ↳ Respuesta recibida (${allText.length} chars), parseando...`, '');
-
-  // Buscar JSON con el campo "concesiones"
-  const jsonMatch = allText.match(/\{[\s\S]*?"concesiones"[\s\S]*?\}/);
-  if (jsonMatch) {
-    try { return JSON.parse(jsonMatch[0]); } catch(e) {}
+  if (data.truncated) {
+    addLog(`  ↳ ⚠ Resultados truncados a ${data.concesiones.length} (hay más en BDNS)`, 'warn');
   }
 
-  // Si la respuesta incluye JSON mal formateado, intentar extraer el bloque más largo
-  const allJsons = [...allText.matchAll(/\{[\s\S]*?\}/g)];
-  const longest = allJsons.sort((a,b) => b[0].length - a[0].length)[0];
-  if (longest) {
-    try { return JSON.parse(longest[0]); } catch(e) {}
+  // Filtro de instrumento client-side (la API ya devuelve códigos SB/PR/GR/VF/AV)
+  if (instrumento && instrumento !== 'todos' && Array.isArray(data.concesiones)) {
+    data.concesiones = data.concesiones.filter(c => c.instrumento === instrumento);
+    data.totalConcesiones = data.concesiones.length;
+    data.importeTotal = data.concesiones.reduce((s, c) => s + (c.importe || 0), 0);
   }
 
-  // Si no hay JSON pero hay texto con datos, pedir a Claude que lo reformatee
-  if (allText.length > 50) {
-    addLog(`  ↳ Sin JSON limpio, solicitando reformateo...`, '');
-    return await reformatResponse(allText, nif, headers);
-  }
-
-  throw new Error('La API no devolvió datos válidos para este NIF.');
-}
-
-// Si Claude devolvió texto en vez de JSON, pedirle que lo convierta
-async function reformatResponse(rawText, nif, headers) {
-  const ctrl2 = new AbortController();
-  const t2 = setTimeout(() => ctrl2.abort(), 30000);
-  try {
-    const res2 = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
-        messages: [{
-          role: 'user',
-          content: `Convierte este texto en el JSON exacto que se pide. Responde SOLO con el JSON:
-
-TEXTO CON DATOS:
-${rawText.slice(0, 3000)}
-
-JSON REQUERIDO:
-{"nif":"${nif}","nombre":"nombre empresa","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"","titulo":"","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"","ccaa":"","provincia":"","instrumento":"SB","convocatoria":""}]}
-
-Si no hay datos de concesiones: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`
-        }]
-      }),
-      signal: ctrl2.signal
-    });
-    clearTimeout(t2);
-    const d2 = await res2.json();
-    const t2text = d2.content.filter(b => b.type==='text').map(b=>b.text).join('');
-    const m2 = t2text.match(/\{[\s\S]*\}/);
-    if (m2) return JSON.parse(m2[0]);
-    throw new Error('No se pudo parsear la respuesta');
-  } finally { clearTimeout(t2); }
+  return data;
 }
 
 // =====================================================
@@ -1818,7 +1633,6 @@ async function iniciarConsulta() {
   const yearFrom    = document.getElementById('yearFrom').value;
   const yearTo      = document.getElementById('yearTo').value;
   const instrumento = document.getElementById('filterInstrumento').value;
-  const apiKey      = (document.getElementById('apiKeyInput').value || '').trim();
 
   searchAborted = false;
 
@@ -1888,10 +1702,10 @@ async function iniciarConsulta() {
       document.getElementById('errorMsg').innerHTML =
         `<strong style="color:var(--accent)">No se encontraron resultados.</strong>\n\n` +
         (lastErrText ? `Error: ${esc(lastErrText)}\n\n` : '') +
-        `<strong>¿Qué hacer?</strong>\n` +
-        `① Introduce tu <strong style="color:var(--text)">Anthropic API Key</strong> en el panel "Configuración API" del sidebar.\n` +
-        `   Obtén una gratis en <a href="https://console.anthropic.com/keys" target="_blank" style="color:var(--accent2)">console.anthropic.com → API Keys</a>\n\n` +
-        `② O explora la app con datos de ejemplo: <button onclick="loadDemo();document.getElementById('errorCard').classList.remove('visible')" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:var(--accent3);font-family:var(--font-mono);font-size:11px;padding:4px 12px;cursor:pointer;margin-left:4px">▶ Cargar Demo</button>`;
+        `<strong>Posibles causas:</strong>\n` +
+        `① Los NIFs introducidos no tienen concesiones registradas en la BDNS para el rango de años seleccionado.\n` +
+        `② La API pública del SNPSAP no responde (el proxy /api/bdns ha devuelto error). Reintenta en unos segundos.\n\n` +
+        `O explora la app con datos de ejemplo: <button onclick="loadDemo();document.getElementById('errorCard').classList.remove('visible')" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:var(--accent3);font-family:var(--font-mono);font-size:11px;padding:4px 12px;cursor:pointer;margin-left:4px">▶ Cargar Demo</button>`;
     } else {
       document.getElementById('errorMsg').innerHTML =
         `${errors} de ${nifs.length} NIF${nifs.length>1?'s':''} fallaron.\n` +
