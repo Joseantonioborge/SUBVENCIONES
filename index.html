@@ -795,8 +795,8 @@
     font-family: var(--font-mono);
     font-size: 12px;
     color: var(--text-muted);
-    line-height: 1.6;
-    white-space: pre-wrap;
+    line-height: 1.8;
+    white-space: pre-line;
   }
 
   /* FOOTER */
@@ -1175,17 +1175,47 @@
         </div>
       </div>
 
+      <!-- API KEY CONFIG -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header">
+          <span class="panel-title">⚙ Configuración API</span>
+          <span id="apiStatus" class="panel-count" style="color:var(--text-muted)">Sin clave</span>
+        </div>
+        <div class="panel-body" style="padding:16px">
+          <div class="opt-group" style="margin-bottom:10px">
+            <label style="font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);display:block;margin-bottom:6px">
+              Anthropic API Key <span style="color:var(--danger)">*</span>
+            </label>
+            <input
+              type="password"
+              id="apiKeyInput"
+              placeholder="sk-ant-api03-..."
+              oninput="updateApiStatus()"
+              style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--font-mono);font-size:12px;padding:8px 10px;outline:none;transition:border-color .2s"
+              onfocus="this.style.borderColor='var(--accent)'"
+              onblur="this.style.borderColor='var(--border)'"
+            >
+          </div>
+          <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);line-height:1.7">
+            Necesaria para consultar la BDNS real.<br>
+            Obtén tu clave en <a href="https://console.anthropic.com/keys" target="_blank" style="color:var(--accent2)">console.anthropic.com</a><br>
+            <span style="color:rgba(100,116,139,0.6)">La clave no se almacena ni se envía a terceros.</span>
+          </div>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-family:var(--font-mono);font-size:10px;color:var(--text-muted);line-height:1.7">
+            Sin clave: usa el botón <strong style="color:var(--accent3)">▶ Demo</strong> del header para ver datos de ejemplo con todas las funcionalidades activas.
+          </div>
+        </div>
+      </div>
+
       <!-- HELP CARD -->
       <div class="panel" style="margin-top:16px">
         <div class="panel-header">
           <span class="panel-title">Instrucciones</span>
         </div>
         <div class="panel-body" style="font-family:var(--font-mono);font-size:11px;line-height:1.8;color:var(--text-muted)">
-          <p>Los datos se obtienen de la <strong style="color:var(--text-dim)">API REST pública del SNPSAP</strong> (infosubvenciones.es), vía IA como proxy para evitar CORS.</p>
+          <p>Los datos provienen de la <strong style="color:var(--text-dim)">API pública del SNPSAP</strong> (infosubvenciones.es) vía Claude con búsqueda web.</p>
           <br>
-          <p>⚠️ <span style="color:var(--accent)">Nota legal:</span> Visualización de concesiones: personas jurídicas hasta 4 años naturales desde el año de concesión, personas físicas: el año de concesión y el siguiente (RD 130/2019).</p>
-          <br>
-          <p>La consulta puede tardar varios segundos por NIF. Pulsa el NIF en la tabla para ver el detalle.</p>
+          <p>⚠️ <span style="color:var(--accent)">Nota legal:</span> Personas jurídicas: hasta 4 años desde la concesión. Personas físicas: año de concesión y el siguiente (RD 130/2019).</p>
         </div>
       </div>
     </div>
@@ -1239,10 +1269,10 @@
       <div class="results-toolbar" id="resultsToolbar">
         <div class="toolbar-left">
           <div class="filter-tabs">
-            <button class="tab-btn active" onclick="switchView('tabla',this)">⊞ Tabla</button>
-            <button class="tab-btn" onclick="switchView('ccaa',this)">◈ Por CCAA</button>
-            <button class="tab-btn" onclick="switchView('nif',this)">◉ Por NIF</button>
-            <button class="tab-btn" onclick="switchView('graficas',this)">◷ Gráficas</button>
+            <button class="tab-btn active" onclick="switchView('tabla')">⊞ Tabla</button>
+            <button class="tab-btn" onclick="switchView('ccaa')">◈ Por CCAA</button>
+            <button class="tab-btn" onclick="switchView('nif')">◉ Por NIF</button>
+            <button class="tab-btn" onclick="switchView('graficas')">◷ Gráficas</button>
           </div>
           <input
             type="text"
@@ -1558,35 +1588,148 @@ function loadDemo() {
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('statsStrip').classList.add('visible');
   document.getElementById('resultsToolbar').classList.add('visible');
-  switchView('tabla', document.querySelector('.tab-btn'));
+  switchView('tabla');
   document.getElementById('lastUpdate').textContent = 'Demo · ' + new Date().toLocaleString('es-ES');
   showToast('✓ Datos demo cargados · ' + allData.length + ' concesiones');
 }
 
 // =====================================================
-// QUERY BDNS VIA CLAUDE API (web_search)
+// API KEY STATUS
+// =====================================================
+function updateApiStatus() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  const el = document.getElementById('apiStatus');
+  if (key.startsWith('sk-ant-')) {
+    el.textContent = '✓ Clave válida';
+    el.style.color = 'var(--accent3)';
+  } else if (key.length > 0) {
+    el.textContent = '⚠ Formato incorrecto';
+    el.style.color = 'var(--accent)';
+  } else {
+    el.textContent = 'Sin clave';
+    el.style.color = 'var(--text-muted)';
+  }
+}
+
+// =====================================================
+// QUERY BDNS — 3-strategy fallback
 // =====================================================
 async function queryNif(nif, yearFrom, yearTo, instrumento) {
+  // Strategy 1: Direct BDNS REST API
+  try {
+    return await queryBDNSDirect(nif, yearFrom, yearTo);
+  } catch (e1) {
+    addLog(`  ↳ API directa falló (${e1.message.slice(0,40)}), intentando proxy...`, '');
+  }
+
+  // Strategy 2: CORS proxy
+  try {
+    return await queryBDNSProxy(nif, yearFrom, yearTo);
+  } catch (e2) {
+    addLog(`  ↳ Proxy falló (${e2.message.slice(0,40)}), intentando Claude API...`, '');
+  }
+
+  // Strategy 3: Anthropic API with user key
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  if (!apiKey) {
+    throw new Error('Sin conexión a BDNS y sin API key. Introduce tu clave Anthropic o usa el modo Demo.');
+  }
+  return await queryViaClaude(nif, yearFrom, yearTo, instrumento, apiKey);
+}
+
+// --- Strategy 1: Direct BDNS REST ---
+async function queryBDNSDirect(nif, yearFrom, yearTo) {
+  let url = `https://www.infosubvenciones.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
+  if (yearFrom) url += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    return mapBDNSResponse(nif, json);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// --- Strategy 2: CORS proxy ---
+async function queryBDNSProxy(nif, yearFrom, yearTo) {
+  let target = `https://www.infosubvenciones.es/bdnstrans/GE/api/concesiones/busqueda?vpd=GE&nifBeneficiario=${encodeURIComponent(nif)}&page=0&pageSize=50`;
+  if (yearFrom) target += `&fechaDesde=01/01/${yearFrom}&fechaHasta=31/12/${yearTo}`;
+
+  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(target)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(proxyUrl, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
+    const json = await res.json();
+    return mapBDNSResponse(nif, json);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// --- Map BDNS API response to internal format ---
+function mapBDNSResponse(nif, json) {
+  // The BDNS API may return { content: [...], totalElements: N } or similar
+  const items = json.content || json.concesiones || json.data || (Array.isArray(json) ? json : []);
+  const concesiones = items.map(item => ({
+    id:             item.codigoBDNS || item.id || item.codigo || '',
+    titulo:         item.denominacion || item.titulo || item.descripcion || item.nombreConvocatoria || '—',
+    importe:        parseFloat(item.importe || item.importeConcedido || item.cuantia || 0) || 0,
+    fechaConcesion: formatBDNSDate(item.fechaConcesion || item.fecha || item.fechaResolucion || ''),
+    organo:         item.organoConvocante || item.organo || item.administracion || '—',
+    ccaa:           item.regionCCAA || item.ccaa || item.comunidadAutonoma || item.region || '—',
+    provincia:      item.provincia || item.municipio || '—',
+    instrumento:    item.instrumento || item.tipoInstrumento || 'SB',
+    convocatoria:   item.codigoConvocatoria || item.convocatoria || ''
+  }));
+
+  const nombre = items[0]?.nombreBeneficiario || items[0]?.beneficiario || items[0]?.razonSocial || nif;
+  const importeTotal = concesiones.reduce((s, c) => s + c.importe, 0);
+
+  return { nif, nombre, totalConcesiones: concesiones.length, importeTotal, concesiones };
+}
+
+function formatBDNSDate(raw) {
+  if (!raw) return '';
+  // Handle ISO dates: 2023-05-12T00:00:00
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  // Already DD/MM/YYYY
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) return raw;
+  return raw;
+}
+
+// --- Strategy 3: Anthropic API ---
+async function queryViaClaude(nif, yearFrom, yearTo, instrumento, apiKey) {
   const yearFilter = (yearFrom && yearTo) ? ` entre ${yearFrom} y ${yearTo}` : '';
   const instrFilter = instrumento ? ` (instrumento: ${instrumento})` : '';
 
-  const prompt = `Eres un asistente que consulta la API REST pública del SNPSAP (Base de Datos Nacional de Subvenciones de España) en infosubvenciones.es.
+  const prompt = `Consulta la Base de Datos Nacional de Subvenciones (BDNS) de España en infosubvenciones.es.
+Busca las concesiones del beneficiario con NIF/CIF "${nif}"${yearFilter}${instrFilter}.
+URL de búsqueda: https://www.infosubvenciones.es/bdnstrans/GE/es/concesiones?nifBeneficiario=${nif}
 
-Busca usando web_search las concesiones de subvenciones del beneficiario NIF/CIF "${nif}"${yearFilter}${instrFilter}.
+Devuelve ÚNICAMENTE JSON sin markdown ni texto adicional:
+{"nif":"${nif}","nombre":"Nombre empresa","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"código","titulo":"título","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"órgano","ccaa":"CCAA","provincia":"provincia","instrumento":"SB","convocatoria":"BDNS-XXXXX"}]}
 
-URL base de la API: https://www.infosubvenciones.es/bdnstrans/GE/api/concesiones/busqueda
-Parámetros útiles: vpd=GE, nifBeneficiario=${nif}, page=0, pageSize=25
+Sin datos: {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`;
 
-También puedes buscar directamente: "infosubvenciones concesiones NIF ${nif}"
-
-Devuelve ÚNICAMENTE un objeto JSON (sin markdown, sin texto adicional) con este esquema exacto:
-{"nif":"${nif}","nombre":"Nombre empresa","totalConcesiones":N,"importeTotal":N,"concesiones":[{"id":"código","titulo":"título convocatoria","importe":N,"fechaConcesion":"DD/MM/YYYY","organo":"nombre órgano","ccaa":"comunidad autónoma","provincia":"provincia","instrumento":"SB","convocatoria":"BDNS-XXXXXX"}]}
-
-Si no encuentras datos reales, devuelve {"nif":"${nif}","nombre":"Sin datos","totalConcesiones":0,"importeTotal":0,"concesiones":[]}`;
-
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
@@ -1595,13 +1738,15 @@ Si no encuentras datos reales, devuelve {"nif":"${nif}","nombre":"Sin datos","to
     })
   });
 
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  const data = await response.json();
-
-  const textBlocks = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
-  const jsonMatch = textBlocks.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Respuesta sin JSON válido para ' + nif);
-  return JSON.parse(jsonMatch[0]);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody?.error?.message || `API ${res.status}`);
+  }
+  const data = await res.json();
+  const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('Sin JSON en respuesta Claude');
+  return JSON.parse(match[0]);
 }
 
 // =====================================================
@@ -1667,13 +1812,26 @@ async function iniciarConsulta() {
   if (allData.length > 0) {
     document.getElementById('statsStrip').classList.add('visible');
     document.getElementById('resultsToolbar').classList.add('visible');
-    switchView('tabla', document.querySelector('.tab-btn'));
+    // Activate first tab button explicitly
+    document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', i===0));
+    switchView('tabla');
     showToast(`✓ ${allData.length} concesiones encontradas${errors?' · '+errors+' errores':''}`);
   } else {
     document.getElementById('emptyState').style.display = 'flex';
+    // Collect real error messages from the log
+    const logLines = [...document.querySelectorAll('#progressLog .log-line.err .msg')].map(el=>el.textContent);
+    const lastError = logLines[logLines.length-1] || '';
+    document.getElementById('errorCard').classList.add('visible');
     if (errors === nifs.length) {
-      document.getElementById('errorCard').classList.add('visible');
-      document.getElementById('errorMsg').textContent = `No se pudo conectar con la API del BDNS.\nVerifica tu conexión o usa el modo Demo.`;
+      document.getElementById('errorMsg').innerHTML =
+        `Todos los NIFs fallaron. Último error:\n<span style="color:var(--accent)">${esc(lastError)}</span>\n\n` +
+        `<strong>Opciones:</strong>\n` +
+        `① Introduce tu <strong>Anthropic API Key</strong> en el panel izquierdo y vuelve a intentarlo.\n` +
+        `② Pulsa <button onclick="loadDemo()" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:var(--accent3);font-family:var(--font-mono);font-size:11px;padding:3px 10px;cursor:pointer">▶ Demo</button> para ver las funcionalidades con datos de ejemplo.\n` +
+        `③ La API BDNS puede estar temporalmente caída — espera unos minutos.`;
+    } else {
+      document.getElementById('errorMsg').innerHTML =
+        `${errors} de ${nifs.length} NIFs fallaron.\n<span style="color:var(--accent)">${esc(lastError)}</span>`;
     }
   }
 
@@ -1999,8 +2157,10 @@ function renderCharts() {
 // =====================================================
 function switchView(view, el) {
   currentView = view;
-  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  el && el.classList.add('active');
+  // Update tab buttons
+  const tabs = document.querySelectorAll('.tab-btn');
+  const viewOrder = ['tabla','ccaa','nif','graficas'];
+  tabs.forEach((b, i) => b.classList.toggle('active', viewOrder[i] === view));
 
   document.getElementById('tableWrap').classList.toggle('visible', view==='tabla');
   document.getElementById('ccaaView').classList.toggle('visible', view==='ccaa');
@@ -2008,7 +2168,7 @@ function switchView(view, el) {
   document.getElementById('chartsView').classList.toggle('visible', view==='graficas');
 
   const pag = document.getElementById('paginationRow');
-  if (pag) pag.style.display = view==='tabla'?'flex':'none';
+  if (pag) pag.style.display = view==='tabla' ? 'flex' : 'none';
 
   if (view==='graficas') renderCharts();
 }
