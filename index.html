@@ -1344,7 +1344,7 @@
 <div class="toast" id="toast"></div>
 
 <footer>
-  <span>BDNS Consulta Masiva · Datos: infosubvenciones.es · © Ministerio de Hacienda</span>
+  <span>BDNS Consulta Masiva  · © Ministerio de Hacienda</span>
   <div class="footer-right">
     <a href="https://www.infosubvenciones.es/bdnstrans/doc/swagger" target="_blank">API Docs ↗</a>
     <span>·</span>
@@ -2289,7 +2289,7 @@ function exportPDF() {
     didDrawPage(data) {
       const pn = doc.internal.getNumberOfPages();
       doc.setTextColor(100,116,139); doc.setFontSize(7);
-      doc.text(`Pág. ${data.pageNumber} · Fuente: infosubvenciones.es (Ministerio de Hacienda)`, 14, doc.internal.pageSize.getHeight()-6);
+      doc.text(`Pág. ${data.pageNumber} · Fuente: (Ministerio de Hacienda)`, 14, doc.internal.pageSize.getHeight()-6);
       doc.text(`BDNS Consulta Masiva · ${new Date().toLocaleDateString('es-ES')}`, pageW-14, doc.internal.pageSize.getHeight()-6, {align:'right'});
     }
   });
